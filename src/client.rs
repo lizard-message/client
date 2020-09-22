@@ -2,6 +2,8 @@ use anyhow::Error;
 use async_native_tls::{TlsConnector, TlsStream};
 use smol::net::TcpStream;
 use std::net::{AddrParseError, SocketAddr};
+use smol::io::{AsyncWriteExt, AsyncReadExt};
+use protocol::send_to_server::decode::Decode;
 
 #[derive(Debug)]
 enum ConnectType {
@@ -31,9 +33,24 @@ impl<'a> Builder<'a> {
     }
 
     pub async fn connect(mut self) -> Result<Client, Error> {
-        let addr = SocketAddr::new(self.host, self.port)?;
+        let addr = SocketAddr::new(self.host.parse()?, self.port);
 
-        let connect = TcpStream::connect(addr).await?;
+        let mut connect = TcpStream::connect(addr).await?;
+
+        let mut buff = [0u8; 1024];
+        let mut decode = Decode::new(1024);
+
+        loop {
+            let size = connect.read(&mut buff).await?;
+
+            if size == 0 {
+                break;
+            } else {
+                decode.set_buff(&buff[..]);
+
+
+            }
+        }
     }
 }
 
