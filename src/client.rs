@@ -1,10 +1,14 @@
-use anyhow::Error;
-use async_native_tls::{TlsStream, connect};
-use protocol::send_to_server::decode::{Decode, Error as DecodeError, Message};
+use super::error::{Error, HandShakeError};
+use async_native_tls::{connect, TlsStream};
+use protocol::send_to_server::{
+    decode::{Decode, Message},
+    encode::ClientConfig,
+};
 use protocol::state::Support;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::net::TcpStream;
-use std::net::{AddrParseError, SocketAddr};
+use std::default::Default;
+use std::net::SocketAddr;
 
 #[derive(Debug)]
 enum ConnectType {
@@ -52,6 +56,7 @@ impl<'a> Builder<'a> {
         self
     }
 
+    // 消息流程为 连接后服务器发送服务器信息, 客户端接收后发送客户端信息
     pub async fn connect(mut self) -> Result<Client, Error> {
         let addr = SocketAddr::new(self.host.parse()?, self.port);
 
@@ -64,25 +69,33 @@ impl<'a> Builder<'a> {
             let size = connect.read(&mut buff).await?;
 
             if size == 0 {
-                return Err(Error::msg("hand shake error"));
+                return Err(Error::HandShake(HandShakeError::ConnectClose));
             } else {
                 decode.set_buff(&buff[..size]);
 
                 if let Some(message) = decode.iter().next() {
                     if let Message::Info(version, mask, max_message_length) = message? {
-                        let mode = Client::select_mode(&mask, &self.support)?;
-                        let stream = Client::select_stream(&mask, &self.tls_option, connect).await?;
+                        let mut config = ClientConfig::default();
+                        if self.support & Support::Push {
+                            config.support_push();
+                        }
+                        if self.support & Support::Pull {
+                            config.support_pull();
+                        }
+                        connect.write(&config.encode()).await?;
 
-                        return Ok(
-                            Client {
-                                stream,
-                                mode,
-                                version,
-                                max_message_length,
-                            }
-                        );
+                        let mode = Client::select_mode(&mask, &self.support)?;
+                        let stream =
+                            Client::select_stream(&mask, &self.tls_option, connect).await?;
+
+                        return Ok(Client {
+                            stream,
+                            mode,
+                            version,
+                            max_message_length,
+                        });
                     } else {
-                        return Err(Error::msg("hand shake error"));
+                        return Err(Error::HandShake(HandShakeError::Parse));
                     }
                 } else {
                     continue;
@@ -102,6 +115,10 @@ pub struct Client {
 
 impl Client {
     fn select_mode(mask: &u16, support: &u16) -> Result<Mode, Error> {
+        if !(*support & Support::Push) && !(*support & Support::Pull) {
+            return Err(Error::HandShake(HandShakeError::ClientPushOrPull));
+        }
+
         let tmp = *mask & *support;
 
         if tmp & Support::Push && tmp & Support::Pull {
@@ -112,12 +129,16 @@ impl Client {
             } else if tmp & Support::Pull {
                 return Ok(Mode::Pull);
             } else {
-                return Err(Error::msg("no select mode"));
+                return Err(Error::HandShake(HandShakeError::ServerPushOrPull));
             }
         }
     }
 
-    async fn select_stream<'a>(mask: &u16, tls_config: &Option<&'a str>, stream: TcpStream) -> Result<ConnectType, Error> {
+    async fn select_stream<'a>(
+        mask: &u16,
+        tls_config: &Option<&'a str>,
+        stream: TcpStream,
+    ) -> Result<ConnectType, Error> {
         let stream = {
             if let Some(domain) = tls_config {
                 if *mask & Support::Tls {
