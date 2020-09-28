@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 smol = "1.0.1"
 async-native-tls = "0.3.3"
-anyhow = "1.0.32"
-# protocol = {git = "https://github.com/lizard-message/protocol"}
-protocol = {path = "../protocol/"}
+thiserror = "1.0.20"
+protocol = {git = "https://github.com/lizard-message/protocol"}
+# protocol = {path = "../protocol/"}
+
