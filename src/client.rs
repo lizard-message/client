@@ -1,5 +1,5 @@
 use super::error::{Error, HandShakeError};
-use async_native_tls::{connect, TlsStream};
+use async_native_tls::connect;
 use protocol::send_to_server::{
     decode::{Decode, Message},
     encode::ClientConfig,
@@ -9,19 +9,8 @@ use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::net::TcpStream;
 use std::default::Default;
 use std::net::SocketAddr;
-
-#[derive(Debug)]
-enum ConnectType {
-    Tls(TlsStream<TcpStream>),
-    Normal(TcpStream),
-}
-
-#[derive(Debug)]
-enum Mode {
-    Push,
-    Pull,
-    PushAndPull,
-}
+use super::connect_type::ConnectType;
+use super::mode::Mode;
 
 #[derive(Debug)]
 pub struct Builder<'a> {
