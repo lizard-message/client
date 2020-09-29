@@ -11,5 +11,4 @@ smol = "1.0.1"
 async-native-tls = "0.3.3"
 thiserror = "1.0.20"
 protocol = {git = "https://github.com/lizard-message/protocol"}
-# protocol = {path = "../protocol/"}
-
+futures = "0.3.5"
