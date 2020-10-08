@@ -1,9 +1,9 @@
 mod client;
-mod error;
 mod connect_type;
 mod daemon;
-mod mode;
+mod error;
 mod intval;
+mod mode;
 
 pub use client::{Builder, Client};
 pub use error::Error;

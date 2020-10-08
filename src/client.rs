@@ -1,16 +1,23 @@
+use super::connect_type::ConnectType;
+use super::daemon::Daemon;
 use super::error::{Error, HandShakeError};
+use super::mode::Mode;
 use async_native_tls::connect;
 use protocol::send_to_server::{
     decode::{Decode, Message},
     encode::ClientConfig,
 };
 use protocol::state::Support;
+use smol::channel::{bounded, Receiver, Sender};
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::net::TcpStream;
+use smol::spawn;
 use std::default::Default;
 use std::net::SocketAddr;
-use super::connect_type::ConnectType;
-use super::mode::Mode;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
 
 #[derive(Debug)]
 pub struct Builder<'a> {
@@ -18,6 +25,7 @@ pub struct Builder<'a> {
     port: u16,
     tls_option: Option<&'a str>,
     support: u16,
+    max_message_total: Option<usize>,
 }
 
 impl<'a> Builder<'a> {
@@ -27,6 +35,7 @@ impl<'a> Builder<'a> {
             port,
             tls_option: None,
             support: 0,
+            max_message_total: None,
         }
     }
 
@@ -42,6 +51,11 @@ impl<'a> Builder<'a> {
 
     pub fn support_pull(mut self) -> Self {
         self.support |= Support::Pull;
+        self
+    }
+
+    pub fn set_max_message_total(mut self, total: usize) -> Self {
+        self.max_message_total = Some(total);
         self
     }
 
@@ -63,7 +77,12 @@ impl<'a> Builder<'a> {
                 decode.set_buff(&buff[..size]);
 
                 if let Some(message) = decode.iter().next() {
-                    if let Message::Info(version, mask, max_message_length) = message? {
+                    if let Message::Info {
+                        version,
+                        support: mask,
+                        max_message_length,
+                    } = message?
+                    {
                         let mut config = ClientConfig::default();
                         if self.support & Support::Push {
                             config.support_push();
@@ -77,12 +96,11 @@ impl<'a> Builder<'a> {
                         let stream =
                             Client::select_stream(&mask, &self.tls_option, connect).await?;
 
-                        return Ok(Client {
-                            stream,
-                            mode,
-                            version,
-                            max_message_length,
-                        });
+                        let max_message_length = Arc::from(AtomicU32::new(max_message_length));
+                        let daemon = Daemon::new(mode, stream, max_message_length.clone());
+                        spawn(daemon.run(decode)).detach();
+
+                        return Ok(Client { max_message_length });
                     } else {
                         return Err(Error::HandShake(HandShakeError::Parse));
                     }
@@ -96,10 +114,8 @@ impl<'a> Builder<'a> {
 
 #[derive(Debug)]
 pub struct Client {
-    stream: ConnectType,
-    mode: Mode,
-    version: u8,
-    max_message_length: u32,
+    // input_sender: Sender<>,
+    max_message_length: Arc<AtomicU32>,
 }
 
 impl Client {

@@ -1,4 +1,3 @@
-
 #[derive(Debug)]
 pub(super) enum Mode {
     Push,
