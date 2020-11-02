@@ -13,6 +13,7 @@ use smol::io::{AsyncReadExt, AsyncWriteExt};
 use std::io::Error as IoError;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use super::action::Action;
 
 #[derive(Debug)]
 pub(super) struct Daemon {
@@ -22,15 +23,19 @@ pub(super) struct Daemon {
 
     // 定时器
     intval: Intval,
+
+    // 与client通信, 接收订阅内容
+    recv: Receiver<Action>,
 }
 
 impl Daemon {
-    pub(super) fn new(mode: Mode, stream: ConnectType, max_message_length: Arc<AtomicU32>) -> Self {
+    pub(super) fn new(mode: Mode, stream: ConnectType, max_message_length: Arc<AtomicU32>, recv: Receiver<Action>) -> Self {
         Self {
             mode,
             stream,
             max_message_length,
             intval: Intval::new(30),
+            recv,
         }
     }
 
@@ -67,7 +72,7 @@ impl Daemon {
                },
                _ =  FutureExt::fuse(self.intval.run()) => {
                   if let Err(e) = self.send_ping().await {
-                      
+
                   }
                }
             }

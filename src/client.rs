@@ -18,6 +18,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
 };
+use super::action::Action;
 
 #[derive(Debug)]
 pub struct Builder<'a> {
@@ -77,12 +78,7 @@ impl<'a> Builder<'a> {
                 decode.set_buff(&buff[..size]);
 
                 if let Some(message) = decode.iter().next() {
-                    if let Message::Info {
-                        version,
-                        support: mask,
-                        max_message_length,
-                    } = message?
-                    {
+                    if let Message::Info(info) = message? {
                         let mut config = ClientConfig::default();
                         if self.support & Support::Push {
                             config.support_push();
@@ -92,15 +88,18 @@ impl<'a> Builder<'a> {
                         }
                         connect.write(&config.encode()).await?;
 
-                        let mode = Client::select_mode(&mask, &self.support)?;
+                        let mode = Client::select_mode(&info.support, &self.support)?;
                         let stream =
-                            Client::select_stream(&mask, &self.tls_option, connect).await?;
+                            Client::select_stream(&info.support, &self.tls_option, connect).await?;
 
-                        let max_message_length = Arc::from(AtomicU32::new(max_message_length));
-                        let daemon = Daemon::new(mode, stream, max_message_length.clone());
+                        let max_message_length = Arc::from(AtomicU32::new(info.max_message_length));
+                        
+                        let (sender, receiver) = bounded(self.max_message_total.unwrap_or(10));
+
+                        let daemon = Daemon::new(mode, stream, max_message_length.clone(), receiver);
                         spawn(daemon.run(decode)).detach();
 
-                        return Ok(Client { max_message_length });
+                        return Ok(Client { max_message_length, input_sender: sender });
                     } else {
                         return Err(Error::HandShake(HandShakeError::Parse));
                     }
@@ -114,7 +113,7 @@ impl<'a> Builder<'a> {
 
 #[derive(Debug)]
 pub struct Client {
-    // input_sender: Sender<>,
+    input_sender: Sender<Action>,
     max_message_length: Arc<AtomicU32>,
 }
 
