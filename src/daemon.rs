@@ -6,10 +6,11 @@ use futures::future::FutureExt;
 use futures::select;
 use protocol::send_to_server::{
     decode::{Decode, Message},
-    encode::{Ok, Ping, Pong, TurnPull, TurnPush},
+    encode::{Err, Ok, Ping, Pong, TurnPull, TurnPush},
 };
 use smol::channel::{bounded, Receiver, Sender};
 use smol::io::{AsyncReadExt, AsyncWriteExt};
+use std::io::Error as IoError;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -65,8 +66,9 @@ impl Daemon {
                    }
                },
                _ =  FutureExt::fuse(self.intval.run()) => {
-                    self.stream.write(Ping::encode()).await;
-                    self.stream.flush().await;
+                  if let Err(e) = self.send_ping().await {
+                      
+                  }
                }
             }
         }
@@ -81,19 +83,43 @@ impl Daemon {
                 self.intval.reset();
             }
             Message::TurnPush => {
-                if self.mode.can_push() {
-                    self.stream.write(Ok::encode()).await?;
-                } else {
-                }
+                self.send_turn_push().await?;
             }
             Message::TurnPull => {
-                if self.mode.can_pull() {
-                    self.stream.write(Ok::encode()).await?;
-                } else {
-                }
+                self.send_turn_pull().await?;
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn send_ping(&mut self) -> Result<(), IoError> {
+        self.stream.write(Ping::encode()).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+
+    async fn send_turn_push(&mut self) -> Result<(), IoError> {
+        if self.mode.can_push() {
+            self.stream.write(Ok::encode()).await?;
+        } else {
+            self.stream
+                .write(&Err::new("Client not support push").encode())
+                .await?;
+        }
+        self.stream.flush().await?;
+        Ok(())
+    }
+
+    async fn send_turn_pull(&mut self) -> Result<(), IoError> {
+        if self.mode.can_pull() {
+            self.stream.write(Ok::encode()).await?;
+        } else {
+            self.stream
+                .write(&Err::new("Client not support pull").encode())
+                .await?;
+        }
+        self.stream.flush().await?;
         Ok(())
     }
 }
