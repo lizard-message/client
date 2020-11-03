@@ -2,6 +2,7 @@ use async_native_tls::Error as TlsError;
 use protocol::send_to_server::decode::Error as DecodeError;
 use std::io::Error as IoError;
 use std::net::AddrParseError;
+use std::string::FromUtf8Error;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -20,6 +21,9 @@ pub enum Error {
 
     #[error("hand shake error, because `{0}`")]
     HandShake(HandShakeError),
+
+    #[error("convert utf8 error, because `{0}`")]
+    Utf8(#[from] FromUtf8Error),
 }
 
 #[derive(Debug, Error)]
