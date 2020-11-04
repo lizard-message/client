@@ -171,13 +171,33 @@ impl Client {
     pub async fn subscription(&mut self, sub_name: &str) -> Subscription {
         let (sender, receiver) = bounded(self.max_task_total);
 
-        self.daemon_sender
+        if let Err(e) = self
+            .daemon_sender
             .send(Action::Sub {
                 sub_name: sub_name.to_string(),
                 msg_sender: sender,
             })
-            .await;
+            .await
+        {
+            panic!("daemon already closed {:?}", e);
+        }
 
         Subscription::new(receiver)
+    }
+
+    pub async fn publish<A>(&mut self, sub_name: &str, payload: A)
+    where
+        A: Into<Vec<u8>>,
+    {
+        if let Err(e) = self
+            .daemon_sender
+            .send(Action::Pub {
+                sub_name: sub_name.to_string(),
+                payload: payload.into(),
+            })
+            .await
+        {
+            panic!("daemon already closed {:?}", e);
+        }
     }
 }

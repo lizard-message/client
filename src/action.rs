@@ -6,5 +6,8 @@ pub(super) enum Action {
         sub_name: String,
         msg_sender: Sender<String>,
     },
-    Pub,
+    Pub {
+        sub_name: String,
+        payload: Vec<u8>,
+    },
 }

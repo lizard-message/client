@@ -7,7 +7,7 @@ use futures::future::FutureExt;
 use futures::select;
 use protocol::send_to_server::{
     decode::{Decode, Message},
-    encode::{Err, Ok, Ping, Pong, TurnPull, TurnPush, Sub},
+    encode::{Err, Ok, Ping, Pong, Pub, Sub, TurnPull, TurnPush},
 };
 use smol::channel::{bounded, Receiver, Sender};
 use smol::io::{AsyncReadExt, AsyncWriteExt};
@@ -59,13 +59,13 @@ impl Daemon {
                result = FutureExt::fuse(self.stream.read(&mut buff)) => {
                    match result {
                        Ok(0) => {
-                           break 'main;
+                          break 'main;
                        },
                        Ok(size) => {
                           self.decode_handle(&mut decode, &buff[..size]).await;
                        },
                        Err(e) => {
-
+                          println!("decode {:?}", e);
                        }
                    }
                },
@@ -73,11 +73,11 @@ impl Daemon {
                   match result {
                       Ok(action) => {
                           if let Err(e) = self.match_action(action).await {
-                              println!("{:?}", e);
+                            println!("{:?}", e);
                           }
                       }
                       Err(e) => {
-                          println!("{:?}", e);
+                          println!("recv error {:?}", e);
                       }
                   }
                },
@@ -95,8 +95,14 @@ impl Daemon {
 
         for message_result in decode.iter() {
             match message_result {
-                Ok(message) => if let Err(e) = self.match_message(message).await {},
-                Err(e) => {}
+                Ok(message) => {
+                    if let Err(e) = self.match_message(message).await {
+                        println!("decode error {:?}", e);
+                    }
+                }
+                Err(e) => {
+                    println!("decode error {:?}", e);
+                }
             }
         }
     }
@@ -160,21 +166,38 @@ impl Daemon {
         Ok(())
     }
 
+    async fn send_pub<A>(&mut self, sub_name: &str, payload: A) -> Result<(), IoError>
+    where
+        A: AsRef<[u8]>,
+    {
+        self.stream
+            .write(&Pub::new(sub_name, payload).encode())
+            .await?;
+
+        Ok(())
+    }
+
     // 从服务器那边接受消息
     async fn recv_msg<'a>(&mut self, sub_name: String, msg: Cow<'a, str>) {
         if let Some(sender) = self.sub_map.get_mut(&sub_name) {
             if let Err(_) = sender.send(msg.into_owned()).await {
                 self.sub_map.remove(&sub_name);
             }
-        } 
+        }
     }
 
     async fn match_action(&mut self, action: Action) -> Result<(), Error> {
         match action {
-            Action::Sub {sub_name, msg_sender} => {
+            Action::Sub {
+                sub_name,
+                msg_sender,
+            } => {
                 self.set_sub(sub_name, msg_sender).await?;
             }
-            Action::Pub => {
+            Action::Pub { sub_name, payload } => {
+                self.set_publish(sub_name, payload).await?;
+            }
+            Action::ShutDown => {
 
             }
         }
@@ -182,10 +205,17 @@ impl Daemon {
         Ok(())
     }
 
-
-    async fn set_sub(&mut self, sub_name: String, subscription_sender: Sender<String> ) -> Result<(), IoError> {
+    async fn set_sub(
+        &mut self,
+        sub_name: String,
+        subscription_sender: Sender<String>,
+    ) -> Result<(), IoError> {
         self.send_sub(&sub_name).await?;
         self.sub_map.insert(sub_name, subscription_sender);
         Ok(())
+    }
+
+    async fn set_publish(&mut self, sub_name: String, payload: Vec<u8>) -> Result<(), IoError> {
+        self.send_pub(&sub_name, payload).await
     }
 }

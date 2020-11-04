@@ -20,9 +20,8 @@ impl Subscription {
             match self.recv.recv().await {
                 Ok(msg) => proccess(msg),
                 Err(e) => {
-                    println!("{:?}", e);
                     break;
-                },
+                }
             }
         }
     }
