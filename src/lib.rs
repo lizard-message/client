@@ -8,6 +8,6 @@ mod intval;
 mod mode;
 mod subscription;
 
-pub use client::{Builder, Client};
+pub use crate::client::{Builder, Client};
 pub use error::Error;
 pub use subscription::Subscription;
