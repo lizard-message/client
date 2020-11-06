@@ -3,6 +3,7 @@ use super::connect_type::ConnectType;
 use super::error::Error;
 use super::intval::Intval;
 use super::mode::Mode;
+use bytes::BytesMut;
 use futures::future::FutureExt;
 use futures::select;
 use protocol::send_to_server::{
@@ -31,7 +32,7 @@ pub(super) struct Daemon {
 
     client_recv: Receiver<Action>,
 
-    sub_map: HashMap<String, Sender<String>>,
+    sub_map: HashMap<String, Sender<BytesMut>>,
 }
 
 impl Daemon {
@@ -76,8 +77,8 @@ impl Daemon {
                             println!("{:?}", e);
                           }
                       }
-                      Err(e) => {
-                          println!("recv error {:?}", e);
+                      Err(_) => {
+                          break;
                       }
                   }
                },
@@ -123,7 +124,7 @@ impl Daemon {
             }
             Message::Msg(msg) => {
                 let sub_name = String::from_utf8(msg.sub_name.to_vec())?;
-                let payload = String::from_utf8_lossy(&msg.payload);
+                let payload = msg.payload;
                 self.recv_msg(sub_name, payload).await;
             }
             _ => {}
@@ -163,6 +164,7 @@ impl Daemon {
 
     async fn send_sub(&mut self, sub_name: &str) -> Result<(), IoError> {
         self.stream.write(&Sub::new(sub_name).encode()[..]).await?;
+        self.stream.flush().await?;
         Ok(())
     }
 
@@ -173,14 +175,14 @@ impl Daemon {
         self.stream
             .write(&Pub::new(sub_name, payload).encode())
             .await?;
-
+        self.stream.flush().await?;
         Ok(())
     }
 
     // 从服务器那边接受消息
-    async fn recv_msg<'a>(&mut self, sub_name: String, msg: Cow<'a, str>) {
+    async fn recv_msg<'a>(&mut self, sub_name: String, msg: BytesMut) {
         if let Some(sender) = self.sub_map.get_mut(&sub_name) {
-            if let Err(_) = sender.send(msg.into_owned()).await {
+            if let Err(_) = sender.send(msg).await {
                 self.sub_map.remove(&sub_name);
             }
         }
@@ -197,9 +199,6 @@ impl Daemon {
             Action::Pub { sub_name, payload } => {
                 self.set_publish(sub_name, payload).await?;
             }
-            Action::ShutDown => {
-
-            }
         }
 
         Ok(())
@@ -208,7 +207,7 @@ impl Daemon {
     async fn set_sub(
         &mut self,
         sub_name: String,
-        subscription_sender: Sender<String>,
+        subscription_sender: Sender<BytesMut>,
     ) -> Result<(), IoError> {
         self.send_sub(&sub_name).await?;
         self.sub_map.insert(sub_name, subscription_sender);
