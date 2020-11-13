@@ -3,23 +3,22 @@ use super::connect_type::ConnectType;
 use super::error::Error;
 use super::intval::Intval;
 use super::mode::Mode;
-use bytes::BytesMut;
+use bytes::{BytesMut, Buf};
 use futures::future::FutureExt;
 use futures::select;
 use protocol::send_to_server::{
     decode::{Decode, Message},
-    encode::{Err, Ok, Ping, Pong, Pub, Sub, TurnPull, TurnPush},
+    encode::{Err, Ok, Ping, Pong, Pub, Sub, TurnPull, TurnPush, UnSub},
 };
 use smol::channel::{bounded, Receiver, Sender};
 use smol::io::{AsyncReadExt, AsyncWriteExt};
-use smol::lock::Mutex;
-use std::borrow::Cow;
+use smol::block_on;
 use std::collections::HashMap;
 use std::io::Error as IoError;
-use std::ops::Deref;
 use std::string::String;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::ops::Drop;
 
 #[derive(Debug)]
 pub(super) struct Daemon {
@@ -32,6 +31,7 @@ pub(super) struct Daemon {
 
     client_recv: Receiver<Action>,
 
+    // 订阅, 记录订阅与行为关系
     sub_map: HashMap<String, Sender<BytesMut>>,
 }
 
@@ -179,6 +179,14 @@ impl Daemon {
         Ok(())
     }
 
+    async fn send_unsub(&mut self, unsub_payload: BytesMut) -> Result<(), IoError> {
+        self.stream
+            .write(unsub_payload.bytes())
+            .await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+
     // 从服务器那边接受消息
     async fn recv_msg<'a>(&mut self, sub_name: String, msg: BytesMut) {
         if let Some(sender) = self.sub_map.get_mut(&sub_name) {
@@ -217,4 +225,21 @@ impl Daemon {
     async fn set_publish(&mut self, sub_name: String, payload: Vec<u8>) -> Result<(), IoError> {
         self.send_pub(&sub_name, payload).await
     }
+}
+
+impl Drop for Daemon {
+    
+    //  折构时尝试发送取消订阅到服务端
+    fn drop(&mut self) {
+        block_on(async {
+            let mut unsub = UnSub::new();
+             self.sub_map.keys().for_each(|sub_name| {
+                      unsub.push(sub_name.as_bytes());
+                  });
+
+            self.send_unsub(unsub.encode()).await;
+             
+        });
+    }
+
 }
