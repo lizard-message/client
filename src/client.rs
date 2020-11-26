@@ -10,6 +10,7 @@ use protocol::send_to_server::{
     encode::ClientConfig,
 };
 use protocol::state::Support;
+use smol::block_on;
 use smol::channel::{bounded, Sender};
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::lock::Mutex;
@@ -22,6 +23,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
 };
+use waitgroup::{WaitGroup, Worker};
 
 #[derive(Debug)]
 pub struct Builder<'a> {
@@ -68,6 +70,7 @@ impl<'a> Builder<'a> {
         let addr = SocketAddr::new(self.host.parse()?, self.port);
 
         let mut connect = TcpStream::connect(addr).await?;
+        connect.set_nodelay(true)?;
 
         let mut buff = [0u8; 1024];
         let mut decode = Decode::new(1024);
@@ -90,6 +93,7 @@ impl<'a> Builder<'a> {
                             config.support_pull();
                         }
                         connect.write(&config.encode()).await?;
+                        connect.flush().await?;
 
                         let mode = Client::select_mode(&info.support, &self.support)?;
                         let stream =
@@ -97,7 +101,7 @@ impl<'a> Builder<'a> {
 
                         let max_message_length = Arc::from(AtomicU32::new(info.max_message_length));
 
-                        let (sender, receiver) = bounded::<Action>(10);
+                        let (sender, receiver) = bounded::<(Action, Option<Worker>)>(10);
 
                         let daemon =
                             Daemon::new(mode, stream, max_message_length.clone(), receiver);
@@ -123,7 +127,7 @@ impl<'a> Builder<'a> {
 pub struct Client {
     max_task_total: usize,
     max_message_length: Arc<AtomicU32>,
-    daemon_sender: Sender<Action>,
+    daemon_sender: Sender<(Action, Option<Worker>)>,
 }
 
 impl Client {
@@ -173,10 +177,13 @@ impl Client {
 
         if let Err(e) = self
             .daemon_sender
-            .send(Action::Sub {
-                sub_name: sub_name.to_string(),
-                msg_sender: sender,
-            })
+            .send((
+                Action::Sub {
+                    sub_name: sub_name.to_string(),
+                    msg_sender: sender,
+                },
+                None,
+            ))
             .await
         {
             panic!("daemon already closed {:?}", e);
@@ -185,19 +192,70 @@ impl Client {
         Subscription::new(receiver)
     }
 
+    pub fn subscription_sync(&mut self, sub_name: &str) -> Subscription {
+        block_on(async {
+            let (sender, receiver) = bounded(self.max_task_total);
+            let wg = WaitGroup::new();
+
+            if let Err(e) = self
+                .daemon_sender
+                .send((
+                    Action::Sub {
+                        sub_name: sub_name.to_string(),
+                        msg_sender: sender,
+                    },
+                    Some(wg.worker()),
+                ))
+                .await
+            {
+                panic!("daemon already closed {:?}", e);
+            }
+
+            wg.wait().await;
+
+            Subscription::new(receiver)
+        })
+    }
+
     pub async fn publish<A>(&mut self, sub_name: &str, payload: A)
     where
         A: Into<Vec<u8>>,
     {
         if let Err(e) = self
             .daemon_sender
-            .send(Action::Pub {
-                sub_name: sub_name.to_string(),
-                payload: payload.into(),
-            })
+            .send((
+                Action::Pub {
+                    sub_name: sub_name.to_string(),
+                    payload: payload.into(),
+                },
+                None,
+            ))
             .await
         {
             panic!("daemon already closed {:?}", e);
         }
+    }
+
+    pub fn publish_sync<A>(&mut self, sub_name: &str, payload: A)
+    where
+        A: Into<Vec<u8>>,
+    {
+        block_on(async {
+            let wg = WaitGroup::new();
+            if let Err(e) = self
+                .daemon_sender
+                .send((
+                    Action::Pub {
+                        sub_name: sub_name.to_string(),
+                        payload: payload.into(),
+                    },
+                    Some(wg.worker()),
+                ))
+                .await
+            {
+                panic!("daemon already closed {:?}", e);
+            }
+            wg.wait().await;
+        });
     }
 }

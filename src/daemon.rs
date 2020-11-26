@@ -3,22 +3,24 @@ use super::connect_type::ConnectType;
 use super::error::Error;
 use super::intval::Intval;
 use super::mode::Mode;
-use bytes::{BytesMut, Buf};
+use bytes::{Buf, BytesMut};
 use futures::future::FutureExt;
 use futures::select;
 use protocol::send_to_server::{
     decode::{Decode, Message},
     encode::{Err, Ok, Ping, Pong, Pub, Sub, TurnPull, TurnPush, UnSub},
 };
+use smol::block_on;
 use smol::channel::{bounded, Receiver, Sender};
 use smol::io::{AsyncReadExt, AsyncWriteExt};
-use smol::block_on;
 use std::collections::HashMap;
 use std::io::Error as IoError;
+use std::ops::Drop;
 use std::string::String;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::ops::Drop;
+use waitgroup::Worker;
+use log::debug;
 
 #[derive(Debug)]
 pub(super) struct Daemon {
@@ -29,7 +31,7 @@ pub(super) struct Daemon {
     // 定时器
     intval: Intval,
 
-    client_recv: Receiver<Action>,
+    client_recv: Receiver<(Action, Option<Worker>)>,
 
     // 订阅, 记录订阅与行为关系
     sub_map: HashMap<String, Sender<BytesMut>>,
@@ -40,7 +42,7 @@ impl Daemon {
         mode: Mode,
         stream: ConnectType,
         max_message_length: Arc<AtomicU32>,
-        client_recv: Receiver<Action>,
+        client_recv: Receiver<(Action, Option<Worker>)>,
     ) -> Self {
         Self {
             mode,
@@ -72,8 +74,8 @@ impl Daemon {
                },
                result = FutureExt::fuse(self.client_recv.recv()) => {
                   match result {
-                      Ok(action) => {
-                          if let Err(e) = self.match_action(action).await {
+                      Ok((action, worker)) => {
+                          if let Err(e) = self.match_action(action, worker).await {
                             println!("{:?}", e);
                           }
                       }
@@ -123,6 +125,7 @@ impl Daemon {
                 self.reply_turn_pull().await?;
             }
             Message::Msg(msg) => {
+                debug!("msg {:?}", msg);
                 let sub_name = String::from_utf8(msg.sub_name.to_vec())?;
                 let payload = msg.payload;
                 self.recv_msg(sub_name, payload).await;
@@ -165,6 +168,7 @@ impl Daemon {
     async fn send_sub(&mut self, sub_name: &str) -> Result<(), IoError> {
         self.stream.write(&Sub::new(sub_name).encode()[..]).await?;
         self.stream.flush().await?;
+        debug!("send_sub finish");
         Ok(())
     }
 
@@ -180,9 +184,7 @@ impl Daemon {
     }
 
     async fn send_unsub(&mut self, unsub_payload: BytesMut) -> Result<(), IoError> {
-        self.stream
-            .write(unsub_payload.bytes())
-            .await?;
+        self.stream.write(unsub_payload.bytes()).await?;
         self.stream.flush().await?;
         Ok(())
     }
@@ -196,16 +198,27 @@ impl Daemon {
         }
     }
 
-    async fn match_action(&mut self, action: Action) -> Result<(), Error> {
+    async fn match_action(
+        &mut self,
+        action: Action,
+        wait_group: Option<Worker>,
+    ) -> Result<(), Error> {
         match action {
             Action::Sub {
                 sub_name,
                 msg_sender,
             } => {
                 self.set_sub(sub_name, msg_sender).await?;
+                if let Some(worker) = wait_group {
+                    drop(worker);
+                    debug!("drop worker finish");
+                }
             }
             Action::Pub { sub_name, payload } => {
                 self.set_publish(sub_name, payload).await?;
+                if let Some(worker) = wait_group {
+                    drop(worker);
+                }
             }
         }
 
@@ -228,18 +241,15 @@ impl Daemon {
 }
 
 impl Drop for Daemon {
-    
     //  折构时尝试发送取消订阅到服务端
     fn drop(&mut self) {
         block_on(async {
             let mut unsub = UnSub::new();
-             self.sub_map.keys().for_each(|sub_name| {
-                      unsub.push(sub_name.as_bytes());
-                  });
+            self.sub_map.keys().for_each(|sub_name| {
+                unsub.push(sub_name.as_bytes());
+            });
 
             self.send_unsub(unsub.encode()).await;
-             
         });
     }
-
 }
